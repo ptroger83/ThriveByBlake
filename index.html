@@ -334,8 +334,14 @@ async function openLog(uid){UID=uid;load();const {data,error}=await SB.from('log
   if(!S.onboarded&&!VIEWING&&!Object.keys(S.sessions||{}).length){renderOnboard(1);await pushSupa();return;}
   S.onboarded=true;openWhereYouLeftOff();render();await pushSupa();}
 async function loadRoster(){if(!ME||!ME.is_trainer)return;const {data}=await SB.from('profiles').select('id,email,name,is_trainer,created_at').order('created_at');ROSTER=data||[];}
-async function initSupa(){try{SB=window.supabase.createClient(SUPA.url,SUPA.key);}catch(e){SB=null;return false;}
-  const {data:{session}}=await SB.auth.getSession();if(!session){renderAuth();return true;}
+const SITE=location.origin+location.pathname;
+async function initSupa(){try{SB=window.supabase.createClient(SUPA.url,SUPA.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,storageKey:'peach-barn-auth',storage:window.localStorage}});}catch(e){SB=null;return false;}
+  // arrived from a "reset password" email? the link carries type=recovery in the hash
+  const recovery=/type=recovery/.test(location.hash)||/type=recovery/.test(location.search);
+  let {data:{session}}=await SB.auth.getSession();
+  if(!session){try{const r=await SB.auth.refreshSession();session=r.data&&r.data.session;}catch(e){}}
+  if(!session){renderAuth();return true;}
+  if(recovery){history.replaceState(null,'',SITE);renderNewPassword();return true;}
   const {data:p}=await SB.from('profiles').select('*').eq('id',session.user.id).maybeSingle();ME=p||{id:session.user.id,email:session.user.email,is_trainer:false};
   if(!ME.name&&session.user.user_metadata&&session.user.user_metadata.name){ME.name=session.user.user_metadata.name;SB.from('profiles').update({name:ME.name}).eq('id',ME.id).then(()=>{});}
   await loadRoster();document.body.classList.remove('authing');await openLog(ME.id);return true;}
@@ -356,7 +362,9 @@ function renderAuth(mode){document.body.classList.add('authing');const main=docu
   <div class="err" id="auErr"></div>
   <div class="row"><button class="btn p" id="auGo" onclick="App.auth('${signup?'signup':'signin'}')">${signup?'Create account':'Sign in'}</button></div>
   <p class="note" style="text-align:center;margin-top:14px">${signup?'Already have an account? <a href="#" onclick="renderAuth(\'signin\');return false" style="color:var(--acc)">Sign in</a>':'New here? <a href="#" onclick="renderAuth(\'signup\');return false" style="color:var(--acc)">Create an account</a>'}</p>
-  <p class="note" style="text-align:center">Forgot your password? Ask Blake to reset it.</p></div>`;document.getElementById('auEmail').focus();}
+  ${signup?'':'<p class="note" style="text-align:center"><a href="#" onclick="renderForgot();return false" style="color:var(--acc)">Forgot your password?</a></p>'}</div>`;document.getElementById('auEmail').focus();}
+function renderForgot(){document.body.classList.add('authing');const main=document.getElementById('main');main.innerHTML=`<div class="auth"><h2>Reset your password</h2><p class="note" style="margin:0 0 8px">Enter your email and we'll send a link. Open it on this phone, set a new password, then sign in from your home-screen icon.</p><input type="email" id="auEmail" placeholder="Email" autocomplete="email" inputmode="email"><div class="err" id="auErr"></div><div class="row"><button class="btn p" id="auGo" onclick="App.forgot()">Send reset link</button></div><p class="note" style="text-align:center;margin-top:14px"><a href="#" onclick="renderAuth('signin');return false" style="color:var(--acc)">Back to sign in</a></p></div>`;document.getElementById('auEmail').focus();}
+function renderNewPassword(){document.body.classList.add('authing');const main=document.getElementById('main');document.getElementById('title').textContent='🍑 The Peach Barn';document.getElementById('subtitle').textContent='Thrive by Blake';document.getElementById('sync').style.display='none';main.innerHTML=`<div class="auth"><h2>Choose a new password</h2><input type="password" id="auPass" placeholder="New password (8+ characters)" autocomplete="new-password"><input type="password" id="auPass2" placeholder="Type it again" autocomplete="new-password"><div class="err" id="auErr"></div><div class="row"><button class="btn p" id="auGo" onclick="App.setPassword()">Save password</button></div></div>`;document.getElementById('auPass').focus();}
 async function initRemote(){try{
   const [d,u]=await Promise.all([claude.use('db'),claude.use('user')]);
   if(!d||!u)return;userId=await u.id();if(!userId)return;db=d;
@@ -697,6 +705,12 @@ App.auth=async mode=>{const email=(document.getElementById('auEmail').value||'')
   if(mode==='signup'){const name=(document.getElementById('auName').value||'').trim();if(!name){err.textContent='Add your name.';go.disabled=false;go.textContent='Create account';return;}if(!document.getElementById('auTerms').checked){err.textContent='Please tick the box to agree to the terms.';go.disabled=false;go.textContent='Create account';return;}r=await SB.auth.signUp({email,password:pass,options:{data:{name,terms_accepted_at:new Date().toISOString(),terms_version:'2026-11-16'}}});if(!r.error&&r.data&&r.data.user&&!r.data.session){r=await SB.auth.signInWithPassword({email,password:pass});}}
   else r=await SB.auth.signInWithPassword({email,password:pass});
   if(r.error){err.textContent=/invalid/i.test(r.error.message)?'Wrong email or password.':/already/i.test(r.error.message)?'That email already has an account — sign in instead.':r.error.message;go.disabled=false;go.textContent=mode==='signup'?'Create account':'Sign in';return;}
+  location.hash='#today';await initSupa();};
+App.forgot=async()=>{const email=(document.getElementById('auEmail').value||'').trim().toLowerCase();const err=document.getElementById('auErr');const go=document.getElementById('auGo');err.textContent='';if(!/^\S+@\S+\.\S+$/.test(email)){err.textContent='That email doesn\'t look right.';return;}go.disabled=true;go.textContent='…';
+  const {error}=await SB.auth.resetPasswordForEmail(email,{redirectTo:SITE});go.disabled=false;go.textContent='Send reset link';
+  if(error){err.textContent=error.message;return;}err.style.color='var(--acc2)';err.textContent='Sent. Check your email (and spam) — the link works for an hour.';};
+App.setPassword=async()=>{const a=document.getElementById('auPass').value||'',b=document.getElementById('auPass2').value||'';const err=document.getElementById('auErr');const go=document.getElementById('auGo');err.textContent='';if(a.length<8){err.textContent='Password needs 8 or more characters.';return;}if(a!==b){err.textContent='Those don\'t match.';return;}go.disabled=true;go.textContent='…';
+  const {error}=await SB.auth.updateUser({password:a});if(error){err.textContent=error.message;go.disabled=false;go.textContent='Save password';return;}
   location.hash='#today';await initSupa();};
 App.signOut=async()=>{if(SB){await SB.auth.signOut();}UID=null;ME=null;VIEWING=null;ROSTER=[];location.reload();};
 App.viewClient=async id=>{if(!ME||!ME.is_trainer)return;VIEWING=id===ME.id?null:ROSTER.find(p=>p.id===id)||null;await openLog(id);location.hash='#today';render();window.scrollTo(0,0);};
